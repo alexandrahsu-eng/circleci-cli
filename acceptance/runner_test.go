@@ -805,8 +805,12 @@ func TestRunnerResourceClassCreate_OrgMismatch(t *testing.T) {
 
 // --- resource-class delete ---
 
+// Without --force a non-interactive run does not prompt and does not fail
+// early: it asks for the non-cascading delete, and runner-admin's 409 is what
+// keeps my-org/linux-runner (which has tokens, see setupRunnerFake) and its
+// tokens from being deleted.
 func TestRunnerResourceClassDelete_NoForce(t *testing.T) {
-	_, env := setupRunnerFake(t)
+	fake, env := setupRunnerFake(t)
 
 	result := binary.RunCLI(t, binary.RunOpts{
 		Binary:  binaryPath,
@@ -815,9 +819,110 @@ func TestRunnerResourceClassDelete_NoForce(t *testing.T) {
 		WorkDir: t.TempDir(),
 	})
 
-	assert.Check(t, cmp.Equal(result.ExitCode, 6))
+	assert.Check(t, cmp.Equal(result.ExitCode, clierrors.ExitAPIError))
 	assert.Check(t, golden.String(result.Stdout, t.Name()+".txt"))
 	assert.Check(t, golden.String(result.Stderr, t.Name()+".stderr.txt"))
+
+	t.Run("check requests", func(t *testing.T) {
+		reqs := fake.AllRequests()
+		assert.Assert(t, cmp.Len(reqs, 2))
+		assert.Check(t, cmp.Equal(reqs[1].Method, http.MethodDelete))
+		assert.Check(t, cmp.Equal(reqs[1].URL.Path, "/api/v3/runner/resource-classes/"+testLinuxRCID))
+		assert.Check(t, cmp.Equal(reqs[1].URL.RawQuery, ""))
+	})
+
+	t.Run("nothing is deleted", func(t *testing.T) {
+		assert.Check(t, cmp.Contains(listedResourceClasses(t, env), "my-org/linux-runner"))
+		assert.Check(t, cmp.Len(listedTokens(t, env, "my-org/linux-runner"), 2))
+	})
+}
+
+// my-org/arm-runner has no tokens (see setupRunnerFake), so a non-interactive
+// run without --force deletes it, without asking runner-admin to cascade.
+func TestRunnerResourceClassDelete_NoForce_NoTokens(t *testing.T) {
+	fake, env := setupRunnerFake(t)
+
+	result := binary.RunCLI(t, binary.RunOpts{
+		Binary:  binaryPath,
+		Args:    []string{"runner", "resource-class", "delete", "my-org/arm-runner"},
+		Env:     env.Environ(),
+		WorkDir: t.TempDir(),
+	})
+
+	assert.Check(t, cmp.Equal(result.ExitCode, 0))
+	assert.Check(t, golden.String(result.Stdout, t.Name()+".txt"))
+	assert.Check(t, golden.String(result.Stderr, t.Name()+".stderr.txt"))
+
+	t.Run("check requests", func(t *testing.T) {
+		reqs := fake.AllRequests()
+		assert.Assert(t, cmp.Len(reqs, 2))
+		assert.Check(t, cmp.Equal(reqs[1].Method, http.MethodDelete))
+		assert.Check(t, cmp.Equal(reqs[1].URL.Path, "/api/v3/runner/resource-classes/22222222-2222-4222-8222-222222222222"))
+		assert.Check(t, cmp.Equal(reqs[1].URL.RawQuery, ""))
+	})
+
+	t.Run("resource class is deleted", func(t *testing.T) {
+		assert.Check(t, !slices.Contains(listedResourceClasses(t, env), "my-org/arm-runner"),
+			"my-org/arm-runner is still listed")
+	})
+}
+
+func TestRunnerResourceClassDelete_NoForce_NoTokens_JSON(t *testing.T) {
+	_, env := setupRunnerFake(t)
+
+	result := binary.RunCLI(t, binary.RunOpts{
+		Binary:  binaryPath,
+		Args:    []string{"runner", "resource-class", "delete", "my-org/arm-runner", "--json"},
+		Env:     env.Environ(),
+		WorkDir: t.TempDir(),
+	})
+
+	assert.Assert(t, cmp.Equal(result.ExitCode, 0), "stderr: %s", result.Stderr)
+
+	var out map[string]any
+	assert.NilError(t, json.Unmarshal([]byte(result.Stdout), &out))
+	assert.Check(t, cmp.DeepEqual(out, map[string]any{
+		"id":             "22222222-2222-4222-8222-222222222222",
+		"resource_class": "my-org/arm-runner",
+	}))
+}
+
+// listedResourceClasses returns the resource classes in the my-org namespace,
+// as the CLI lists them.
+func listedResourceClasses(t *testing.T, env *testenv.TestEnv) []string {
+	t.Helper()
+	result := binary.RunCLI(t, binary.RunOpts{
+		Binary:  binaryPath,
+		Args:    []string{"runner", "resource-class", "list", "--namespace", "my-org", "--json"},
+		Env:     env.Environ(),
+		WorkDir: t.TempDir(),
+	})
+	assert.Assert(t, cmp.Equal(result.ExitCode, 0), "stderr: %s", result.Stderr)
+
+	var out []map[string]any
+	assert.NilError(t, json.Unmarshal([]byte(result.Stdout), &out))
+	resourceClasses := make([]string, 0, len(out))
+	for _, rc := range out {
+		resourceClass, _ := rc["resource_class"].(string)
+		resourceClasses = append(resourceClasses, resourceClass)
+	}
+	return resourceClasses
+}
+
+// listedTokens returns the tokens of resourceClass, as the CLI lists them.
+func listedTokens(t *testing.T, env *testenv.TestEnv, resourceClass string) []map[string]any {
+	t.Helper()
+	result := binary.RunCLI(t, binary.RunOpts{
+		Binary:  binaryPath,
+		Args:    []string{"runner", "token", "list", "--resource-class", resourceClass, "--json"},
+		Env:     env.Environ(),
+		WorkDir: t.TempDir(),
+	})
+	assert.Assert(t, cmp.Equal(result.ExitCode, 0), "stderr: %s", result.Stderr)
+
+	var out []map[string]any
+	assert.NilError(t, json.Unmarshal([]byte(result.Stdout), &out))
+	return out
 }
 
 // A token created between the lookup and the forced delete makes runner-admin answer
@@ -1064,25 +1169,27 @@ func TestRunnerResourceClassUpdate_NoDescription(t *testing.T) {
 }
 
 // my-org/linux-runner already has tokens (see setupRunnerFake). Confirming
-// interactively, without --force, must still delete them: the prompt already
-// warns that tokens and runner connections will be removed, so the delete
-// request always carries force=true once confirmed.
-func TestRunnerResourceClassDelete_HasTokens(t *testing.T) {
+// interactively is consent to delete the resource class alone, not its tokens:
+// only --force cascades, as in v0. So the delete request carries no force
+// parameter, runner-admin rejects it with 409, and nothing is deleted.
+func TestRunnerResourceClassDelete_Interactive_HasTokens(t *testing.T) {
 	fake, env := setupRunnerFake(t)
 
-	console := binary.RunCLIInteractive(t, binary.RunOpts{
+	console := binary.RunCLIInteractiveExitCode(t, binary.RunOpts{
 		Binary:  binaryPath,
 		Args:    []string{"runner", "resource-class", "delete", "my-org/linux-runner"},
 		Env:     env.Environ(),
 		WorkDir: t.TempDir(),
-	})
+	}, clierrors.ExitAPIError)
 
-	assert.Assert(t, t.Run("confirms deletion despite existing tokens", func(t *testing.T) {
+	assert.Assert(t, t.Run("confirming without --force is rejected", func(t *testing.T) {
 		_, err := console.ExpectString("[y/N]")
 		assert.NilError(t, err)
 		_, err = console.Send("y")
 		assert.NilError(t, err)
-		_, err = console.ExpectString("Deleted resource class my-org/linux-runner")
+		_, err = console.ExpectString("was not deleted because it still has tokens.")
+		assert.NilError(t, err)
+		_, err = console.ExpectString("List its tokens: circleci runner token list --resource-class my-org/linux-runner")
 		assert.NilError(t, err)
 	}))
 
@@ -1090,7 +1197,44 @@ func TestRunnerResourceClassDelete_HasTokens(t *testing.T) {
 		reqs := fake.AllRequests()
 		assert.Assert(t, cmp.Len(reqs, 2))
 		assert.Check(t, cmp.Equal(reqs[1].Method, http.MethodDelete))
-		assert.Check(t, cmp.Equal(reqs[1].URL.RawQuery, "force=true"))
+		assert.Check(t, cmp.Equal(reqs[1].URL.Path, "/api/v3/runner/resource-classes/"+testLinuxRCID))
+		assert.Check(t, cmp.Equal(reqs[1].URL.RawQuery, ""))
+	})
+
+	t.Run("nothing is deleted", func(t *testing.T) {
+		assert.Check(t, cmp.Contains(listedResourceClasses(t, env), "my-org/linux-runner"))
+		assert.Check(t, cmp.Len(listedTokens(t, env, "my-org/linux-runner"), 2))
+	})
+}
+
+// my-org/arm-runner has no tokens (see setupRunnerFake), so confirming
+// interactively deletes it without --force, and without asking runner-admin
+// to cascade.
+func TestRunnerResourceClassDelete_Interactive_NoTokens(t *testing.T) {
+	fake, env := setupRunnerFake(t)
+
+	console := binary.RunCLIInteractive(t, binary.RunOpts{
+		Binary:  binaryPath,
+		Args:    []string{"runner", "resource-class", "delete", "my-org/arm-runner"},
+		Env:     env.Environ(),
+		WorkDir: t.TempDir(),
+	})
+
+	assert.Assert(t, t.Run("confirms deletion", func(t *testing.T) {
+		_, err := console.ExpectString("[y/N]")
+		assert.NilError(t, err)
+		_, err = console.Send("y")
+		assert.NilError(t, err)
+		_, err = console.ExpectString("Deleted resource class my-org/arm-runner")
+		assert.NilError(t, err)
+	}))
+
+	t.Run("check requests", func(t *testing.T) {
+		reqs := fake.AllRequests()
+		assert.Assert(t, cmp.Len(reqs, 2))
+		assert.Check(t, cmp.Equal(reqs[1].Method, http.MethodDelete))
+		assert.Check(t, cmp.Equal(reqs[1].URL.Path, "/api/v3/runner/resource-classes/22222222-2222-4222-8222-222222222222"))
+		assert.Check(t, cmp.Equal(reqs[1].URL.RawQuery, ""))
 	})
 }
 
@@ -3008,10 +3152,11 @@ func TestRunnerResourceClassDelete_ByID_JSON(t *testing.T) {
 	})
 }
 
-// Without --force a non-interactive run refuses, and the message names the
-// resource class by namespace/name rather than the ID it was given.
+// Without --force a non-interactive run is rejected while tokens remain, and
+// the message names the resource class by namespace/name rather than the ID it
+// was given.
 func TestRunnerResourceClassDelete_ByID_NoForce(t *testing.T) {
-	_, env := setupRunnerFake(t)
+	fake, env := setupRunnerFake(t)
 
 	result := binary.RunCLI(t, binary.RunOpts{
 		Binary:  binaryPath,
@@ -3020,9 +3165,22 @@ func TestRunnerResourceClassDelete_ByID_NoForce(t *testing.T) {
 		WorkDir: t.TempDir(),
 	})
 
-	assert.Check(t, cmp.Equal(result.ExitCode, clierrors.ExitCancelled))
+	assert.Check(t, cmp.Equal(result.ExitCode, clierrors.ExitAPIError))
 	assert.Check(t, golden.String(result.Stdout, t.Name()+".txt"))
 	assert.Check(t, golden.String(result.Stderr, t.Name()+".stderr.txt"))
+
+	t.Run("check requests", func(t *testing.T) {
+		reqs := fake.AllRequests()
+		assert.Assert(t, cmp.Len(reqs, 2))
+		assert.Check(t, cmp.Equal(reqs[1].Method, http.MethodDelete))
+		assert.Check(t, cmp.Equal(reqs[1].URL.Path, "/api/v3/runner/resource-classes/"+testLinuxRCID))
+		assert.Check(t, cmp.Equal(reqs[1].URL.RawQuery, ""))
+	})
+
+	t.Run("nothing is deleted", func(t *testing.T) {
+		assert.Check(t, cmp.Contains(listedResourceClasses(t, env), "my-org/linux-runner"))
+		assert.Check(t, cmp.Len(listedTokens(t, env, "my-org/linux-runner"), 2))
+	})
 }
 
 func TestRunnerResourceClassDelete_ByID_NotFound(t *testing.T) {

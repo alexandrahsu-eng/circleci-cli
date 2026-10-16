@@ -1,4 +1,5 @@
-error: Deleting resource class "my-org/linux-runner" is irreversible.
+error: Resource class "my-org/linux-runner" was not deleted because it still has tokens.
 
 Suggestions:
-  • Pass --force (-f) to skip this prompt in non-interactive mode
+  • List its tokens: circleci runner token list --resource-class my-org/linux-runner
+  • Or delete its tokens too, disconnecting any runners using them: circleci runner resource-class delete my-org/linux-runner --force

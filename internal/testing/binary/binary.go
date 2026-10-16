@@ -42,6 +42,7 @@ import (
 
 	"github.com/pete-woods/go-expect"
 	"gotest.tools/v3/assert"
+	"gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/skip"
 )
 
@@ -175,9 +176,22 @@ func RunCLI(t *testing.T, opts RunOpts) CLIResult {
 }
 
 // RunCLIInteractive executes the circleci binary attached to a PTY and returns
-// the console so callers can drive interactive input with Expect/Send. Call
-// cmd.Wait() after interaction is complete.
+// the console so callers can drive interactive input with Expect/Send. The
+// command must exit 0; that is checked when the test finishes.
 func RunCLIInteractive(t testing.TB, opts RunOpts) *expect.Console {
+	t.Helper()
+	return runCLIInteractive(t, opts, 0)
+}
+
+// RunCLIInteractiveExitCode is RunCLIInteractive for a command expected to
+// fail: when the test finishes it checks that the command exited with
+// wantExitCode rather than 0.
+func RunCLIInteractiveExitCode(t testing.TB, opts RunOpts, wantExitCode int) *expect.Console {
+	t.Helper()
+	return runCLIInteractive(t, opts, wantExitCode)
+}
+
+func runCLIInteractive(t testing.TB, opts RunOpts, wantExitCode int) *expect.Console {
 	t.Helper()
 
 	// 100 columns is wide enough for the OAuth authorize URL, which is now short
@@ -226,7 +240,16 @@ func RunCLIInteractive(t testing.TB, opts RunOpts) *expect.Console {
 			return
 		}
 
-		assert.Check(t, expect.WaitProcess(ctx, cmd))
+		err := expect.WaitProcess(ctx, cmd)
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			assert.Check(t, cmp.Equal(exitErr.ExitCode(), wantExitCode))
+			return
+		}
+		if err != nil {
+			assert.Check(t, err)
+			return
+		}
+		assert.Check(t, cmp.Equal(0, wantExitCode), "command exited 0")
 	})
 
 	return c

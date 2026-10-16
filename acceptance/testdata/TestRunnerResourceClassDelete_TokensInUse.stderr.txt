@@ -1,2 +1,5 @@
-error: Resource class "my-org/linux-runner" still has tokens in use.
+error: Resource class "my-org/linux-runner" was not deleted because it still has tokens.
 error id: trace-409
+
+Suggestions:
+  • A token may have been created during the delete; retry: circleci runner resource-class delete my-org/linux-runner --force

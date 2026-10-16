@@ -526,22 +526,20 @@ func newResourceClassDeleteCmd() *cobra.Command {
 			"destructiveHint": "true",
 		},
 		Long: heredoc.Doc(`
-			Delete a CircleCI runner resource class.
-
-			All tokens associated with the resource class will also be deleted.
-			Connected runner instances will no longer be able to claim jobs.
+			Without --force, the delete is rejected while the resource class has tokens; it
+			prompts first only in an interactive terminal. --force also deletes its tokens.
 
 			JSON fields: id, resource_class
 		`),
 		Example: heredoc.Doc(`
-			# Delete a resource class (with confirmation prompt)
+			# Delete a resource class, after a confirmation prompt
 			$ circleci runner resource-class delete my-org/my-runner
 
-			# Delete without confirmation
+			# Delete it and its tokens, disconnecting any runners that use them
 			$ circleci runner resource-class delete my-org/my-runner --force
 
-			# Delete by ID in a script, and report what was deleted
-			$ circleci runner resource-class delete 01234567-89ab-4cde-8f01-23456789abcd --force --json
+			# In a script: delete by ID unless it has tokens, and report what was deleted
+			$ circleci runner resource-class delete 01234567-89ab-4cde-8f01-23456789abcd --json
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -557,7 +555,7 @@ func newResourceClassDeleteCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation prompt")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "also delete the resource class's tokens, and skip the confirmation prompt")
 	cmdutil.AddJSONFlag(cmd, &jsonOut)
 	cmdutil.AddJQFlag(cmd)
 	return cmd
@@ -584,34 +582,40 @@ func runResourceClassDelete(ctx context.Context, client *apiclient.Client,
 		return err
 	}
 
-	if err := cmdutil.ConfirmOrForce(ctx, iostream.Get(ctx), force,
-		fmt.Sprintf("Delete resource class %q? All tokens and runner connections will be removed.", resourceClass),
-		clierrors.New("runner.delete_aborted", "Deletion aborted",
-			"Resource class deletion was not confirmed.").
-			WithExitCode(clierrors.ExitCancelled),
-		clierrors.New("runner.delete_requires_force", "Deletion requires --force",
-			fmt.Sprintf("Deleting resource class %q is irreversible.", resourceClass)).
-			WithExitCode(clierrors.ExitCancelled),
-	); err != nil {
-		return err
+	// Unlike most deletes, this one does not insist on --force outside a
+	// terminal. Only --force cascades to the resource class's tokens; without
+	// it runner-admin rejects the delete (409) while tokens remain, so that 409
+	// is the confirmation a script gets, as in v0. Requiring --force there
+	// would leave scripts no way to ask for the non-cascading delete.
+	streams := iostream.Get(ctx)
+	if !force && streams.IsInteractive() {
+		if !streams.Confirm(ctx, fmt.Sprintf("Permanently delete resource class %q? (rejected if it has tokens)", resourceClass)) {
+			return clierrors.New("runner.delete_aborted", "Deletion aborted",
+				"Resource class deletion was not confirmed.").
+				WithExitCode(clierrors.ExitCancelled)
+		}
 	}
 
-	// The user has already confirmed (via --force or the prompt) that tokens
-	// and runner connections may be removed, so the delete always requests
-	// that regardless of which path was taken.
-	if err := client.DeleteResourceClass(ctx, id, true); err != nil {
+	if err := client.DeleteResourceClass(ctx, id, force); err != nil {
 		if httpcl.HasStatusCode(err, http.StatusConflict) {
-			// runner-admin's 409 title restates this sentence, so it is not appended;
+			// runner-admin's 409 title gives the same reason, so it is not appended;
 			// only the error id is worth carrying, to quote in a support request.
-			detail := fmt.Sprintf("Resource class %q still has tokens in use.", resourceClass)
+			detail := fmt.Sprintf("Resource class %q was not deleted because it still has tokens.", resourceClass)
 			if apiErr, ok := apiclient.ParseError(err); ok && apiErr.ID != "" {
 				detail += "\nerror id: " + apiErr.ID
 			}
 			cliErr := clierrors.New("runner.delete_has_tokens", "Cannot delete resource class", detail).
 				WithExitCode(clierrors.ExitAPIError)
-			if !force {
+			if force {
+				// --force asked runner-admin to delete the tokens too, so a 409
+				// means a token was created while the delete was in flight.
 				cliErr = cliErr.WithSuggestions(
-					fmt.Sprintf("Retry with --force to delete its tokens too: circleci runner resource-class delete %s --force", resourceClass),
+					fmt.Sprintf("A token may have been created during the delete; retry: circleci runner resource-class delete %s --force", resourceClass),
+				)
+			} else {
+				cliErr = cliErr.WithSuggestions(
+					fmt.Sprintf("List its tokens: circleci runner token list --resource-class %s", resourceClass),
+					fmt.Sprintf("Or delete its tokens too, disconnecting any runners using them: circleci runner resource-class delete %s --force", resourceClass),
 				)
 			}
 			return cliErr

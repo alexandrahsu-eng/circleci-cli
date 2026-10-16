@@ -3960,16 +3960,14 @@ where namespace is your organization name (for example, `my-org/my-runner`).
 
 Delete a runner resource class
 
-Delete a CircleCI runner resource class.
-
-All tokens associated with the resource class will also be deleted.
-Connected runner instances will no longer be able to claim jobs.
+Without --force, the delete is rejected while the resource class has tokens; it
+prompts first only in an interactive terminal. --force also deletes its tokens.
 
 JSON fields: id, resource_class
 
 | Flag          | Description                                                                       |
 | ------------- | --------------------------------------------------------------------------------- |
-| `-f, --force` | skip confirmation prompt                                                          |
+| `-f, --force` | also delete the resource class's tokens, and skip the confirmation prompt         |
 | `--jq string` | Process values from the response using jq syntax (see `circleci help formatting`) |
 | `--json`      | Output as JSON                                                                    |
 
@@ -3986,12 +3984,12 @@ organization name (for example, `my-org/my-runner`), or as its ID.
 
 **Examples:**
 
-- Delete a resource class (with confirmation prompt): 
+- Delete a resource class, after a confirmation prompt: 
   `circleci runner resource-class delete my-org/my-runner`
-- Delete without confirmation: 
+- Delete it and its tokens, disconnecting any runners that use them: 
   `circleci runner resource-class delete my-org/my-runner --force`
-- Delete by ID in a script, and report what was deleted: 
-  `circleci runner resource-class delete 01234567-89ab-4cde-8f01-23456789abcd --force --json`
+- In a script: delete by ID unless it has tokens, and report what was deleted: 
+  `circleci runner resource-class delete 01234567-89ab-4cde-8f01-23456789abcd --json`
 
 ##### `circleci runner resource-class list [namespace] [flags]`
 
