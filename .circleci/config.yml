@@ -200,7 +200,27 @@ jobs:
   ok-to-deploy:
     type: no-op
 
+  approval-test-done:
+    type: no-op
+
 workflows:
+  # A bogus approval gate, for trying out `circleci run approve`. It's a
+  # workflow of its own so that, until it is approved, only this workflow is
+  # left on hold and `ci` still finishes. Nothing depends on it.
+  approval-test:
+    jobs:
+      - hold-for-approval:
+          type: approval
+          filters:
+            branches:
+              ignore:
+                - main
+                - gh-pages
+      - approval-test-done:
+          requires:
+            - hold-for-approval
+
+
   ci:
     jobs:
       # gh-pages holds only generated HTML — never run CI on it. Entry jobs (no
