@@ -1,0 +1,34 @@
+# Injected into each mirror branch by mirror/mirror.sh. Runs the Taskfile target
+# named in .bench-target so GitHub Actions reproduces the CircleCI job that failed.
+#
+# Two differences from a stock runner, both found when scoring the first
+# github-mcp runs (scoring/README.md, "Mirrors"):
+# - uv is installed because chunk-cli's `task ci:lint` runs pylint through uv;
+#   without it the I2 mirror died with `uv: executable file not found`, which is
+#   not what CircleCI saw.
+# - XDG_CONFIG_HOME is cleared for the task step because GitHub runners export
+#   it, and chunk-cli's TestInstallContentMatchesEmbedded reads it, so the T1
+#   mirror failed on that test instead of on the TempDir teardown flake CircleCI
+#   hit. CircleCI's image does not set it.
+name: bench
+on:
+  push:
+    branches: ['case/**']
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: astral-sh/setup-uv@v5
+      - name: Install go-task
+        run: go install github.com/go-task/task/v3/cmd/task@latest
+      - name: Run the failing CircleCI job's task
+        env:
+          XDG_CONFIG_HOME: ""
+        run: |
+          unset XDG_CONFIG_HOME
+          task "$(cat .bench-target)"
